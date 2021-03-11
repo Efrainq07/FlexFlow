@@ -21,8 +21,8 @@ def setup(rank, world_size):
 def cleanup():
     dist.destroy_process_group()
 
-def train(gpu, args):
-    rank = args.nr * args.gpus + gpu	
+def train(local_rank, args):
+    rank = args.nr * args.gpus + local_rank	
     setup(rank, args.world_size)
     transform = transforms.Compose([
                 torchvision.transforms.Resize(224),
@@ -36,23 +36,23 @@ def train(gpu, args):
     trainloader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, num_workers=2,sampler=sampler)
 
     model = models.resnet152()
-    torch.cuda.set_device(gpu)
+    torch.cuda.set_device(local_rank)
     model.cuda()
     print("GPU initialization")
-    dummy_input = torch.randn(1, 3,224,224, dtype=torch.float).to(gpu)
+    dummy_input = torch.randn(1, 3,224,224, dtype=torch.float).to(local_rank) #In order to obtain accurate numbers about performance the GPUs must have already been started
     for _ in range(10):
         _ = model(dummy_input)
-    model = nn.parallel.DistributedDataParallel(model,device_ids=[gpu])
+    model = nn.parallel.DistributedDataParallel(model,device_ids=[local_rank])
 
     criterion = nn.CrossEntropyLoss().cuda()
     optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
     training_run_data = pd.DataFrame(columns=['epoch','batch','batch_size','gpu_number','time'])
-    starter, ender = torch.cuda.Event(enable_timing=True),torch.cuda.Event(enable_timing=True)
     for epoch in range(args.epochs):  # loop over the dataset multiple times
         running_loss = 0.0
         print("Epoch %d"%epoch)
         sampler.set_epoch(epoch)
         for i, data in enumerate(trainloader, 0):
+            starter, ender = torch.cuda.Event(enable_timing=True),torch.cuda.Event(enable_timing=True) #Timing with CUDA events accounts for the asynchronous nature of GPU proceses
             starter.record()
             inputs, labels = data
             inputs = inputs.cuda()
@@ -71,7 +71,7 @@ def train(gpu, args):
                 training_run_data=training_run_data.append(
                         {'epoch':epoch, 'batch':i,'loss':loss.item(),'batch_size':batch_size,'gpu_number':args.gpus*args.nodes,'time (ms)':timer/(batch_size*args.gpus),'throughput':1000*(batch_size*args.gpus)/timer},
                     ignore_index=True)
-                training_run_data.to_csv("training_stats_GPU_%.0f_batchsize_%.0f.csv"%(args.gpus*args.nodes,batch_size),index=False)
+                training_run_data.to_csv("results/training_stats_GPU_%.0f_batchsize_%.0f.csv"%(args.gpus*args.nodes,batch_size),index=False)
                 print("[Epoch %d] Batch: %d Loss: %.3f Time per Image: %.2f msi Throughput:%.2f"%
                 (epoch,i,loss.item(),timer/(batch_size*args.gpus),1000*(batch_size*args.gpus)/timer))
 
